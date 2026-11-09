@@ -1,0 +1,10 @@
+# Roblox Studio & Temporary Files
+*.lock
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Workspace artifacts & system directories
+.gemini/
+.system_generated/
