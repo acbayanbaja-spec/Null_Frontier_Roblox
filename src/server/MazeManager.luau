@@ -15,9 +15,11 @@ local MatchStateNotificationRE = Remotes:WaitForChild("MatchStateNotification")
 local MazeManager = {}
 
 local CHECKPOINT_COORDS = {
-    Checkpoint_Alpha = Vector3.new(0, 12, -400),
-    Checkpoint_Beta = Vector3.new(-85, 12, -480),
-    Checkpoint_Omega = Vector3.new(85, 12, -560)
+    Checkpoint_Alpha = Vector3.new(0, 14, -850),
+    Checkpoint_Beta = Vector3.new(-250, 14, -1250),
+    Checkpoint_Gamma = Vector3.new(250, 28, -1300),
+    Checkpoint_Delta = Vector3.new(0, -5, -1550),
+    Checkpoint_Omega = Vector3.new(0, 16, -1850)
 }
 
 local PUZZLE_SEQUENCE = {"Terminal_Alpha", "Terminal_Beta", "Terminal_Gamma"}
@@ -26,12 +28,26 @@ local PUZZLE_SEQUENCE = {"Terminal_Alpha", "Terminal_Beta", "Terminal_Gamma"}
 -- Key: partyId (string) or "Solo_" .. userId
 local activeRuns = {}
 
-local function getRunKey(player: Player): string
-    local partyId = player:GetAttribute("PartyId")
+local function safeSetAttribute(inst: any, key: string, val: any)
+    if typeof(inst) == "Instance" and inst:IsA("Player") then
+        inst:SetAttribute(key, val)
+    elseif type(inst) == "table" then
+        inst[key] = val
+    end
+end
+
+local function getRunKey(player: any): string
+    local partyId = nil
+    if typeof(player) == "Instance" and player:IsA("Player") then
+        partyId = player:GetAttribute("PartyId")
+    elseif type(player) == "table" and player.PartyId then
+        partyId = player.PartyId
+    end
     if partyId and partyId ~= "" then
         return "Party_" .. tostring(partyId)
     end
-    return "Solo_" .. tostring(player.UserId)
+    local uId = (typeof(player) == "Instance" and player.UserId) or (type(player) == "table" and player.UserId) or 0
+    return "Solo_" .. tostring(uId)
 end
 
 function MazeManager.GetRunState(player: Player): table
@@ -90,8 +106,8 @@ function MazeManager.DeployToMaze(player: Player, partyMode: boolean): (boolean,
     for _, p in ipairs(playersToDeploy) do
         if p.Character then
             teleportChar(p.Character, CHECKPOINT_COORDS.Checkpoint_Alpha)
-            p:SetAttribute("MazeCheckpoint", "Checkpoint_Alpha")
-            p:SetAttribute("MazeVaultUnlocked", false)
+            safeSetAttribute(p, "MazeCheckpoint", "Checkpoint_Alpha")
+            safeSetAttribute(p, "MazeVaultUnlocked", false)
             MatchStateNotificationRE:FireClient(p, "Maze", "Deployed", { Checkpoint = "Checkpoint_Alpha" })
             print(string.format("[MazeManager] Deployed operative %s to Checkpoint Alpha (Run: %s).", p.Name, runKey))
         end
@@ -109,25 +125,27 @@ task.spawn(function()
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             if hrp then
                 local pos = hrp.Position
-                -- Check Beta
-                if (pos - CHECKPOINT_COORDS.Checkpoint_Beta).Magnitude < 16.0 then
-                    if player:GetAttribute("MazeCheckpoint") ~= "Checkpoint_Beta" and player:GetAttribute("MazeCheckpoint") ~= "Checkpoint_Omega" then
-                        player:SetAttribute("MazeCheckpoint", "Checkpoint_Beta")
-                        MatchStateNotificationRE:FireClient(player, "Maze", "CheckpointReached", { Checkpoint = "Checkpoint_Beta" })
-                        print(string.format("[MazeManager] Operative %s reached Checkpoint Beta.", player.Name))
-                    end
-                -- Check Omega
-                elseif (pos - CHECKPOINT_COORDS.Checkpoint_Omega).Magnitude < 16.0 then
-                    if player:GetAttribute("MazeCheckpoint") ~= "Checkpoint_Omega" then
-                        player:SetAttribute("MazeCheckpoint", "Checkpoint_Omega")
-                        MatchStateNotificationRE:FireClient(player, "Maze", "CheckpointReached", { Checkpoint = "Checkpoint_Omega" })
-                        print(string.format("[MazeManager] Operative %s reached Checkpoint Omega.", player.Name))
+                for chkName, chkCoord in pairs(CHECKPOINT_COORDS) do
+                    if (pos - chkCoord).Magnitude < 20.0 then
+                        if player:GetAttribute("MazeCheckpoint") ~= chkName then
+                            safeSetAttribute(player, "MazeCheckpoint", chkName)
+                            MatchStateNotificationRE:FireClient(player, "Maze", "CheckpointReached", { Checkpoint = chkName })
+                            print(string.format("[MazeManager] Operative %s reached %s.", player.Name, chkName))
+                        end
                     end
                 end
             end
         end
     end
 end)
+
+local function findMazeObject(name: string): Instance?
+    local titan = workspace.World:FindFirstChild("EscobillosMaze_Titan")
+    local obj = titan and titan:FindFirstChild(name, true)
+    if obj then return obj end
+    local legacy = workspace.World:FindFirstChild("EscobillosMaze")
+    return legacy and legacy:FindFirstChild(name, true)
+end
 
 -- 3. Isolated Core Alignment Puzzle Logic
 function MazeManager.InteractTerminal(player: Player, terminalName: string): (boolean, string)
@@ -142,9 +160,7 @@ function MazeManager.InteractTerminal(player: Player, terminalName: string): (bo
         return true, "Core Matrix already aligned for your squad. Blast Door unsealed."
     end
     
-    local maze = workspace.World:FindFirstChild("EscobillosMaze")
-    local chamber = maze and maze:FindFirstChild("PuzzleChamber")
-    local termModel = chamber and chamber:FindFirstChild(terminalName)
+    local termModel = findMazeObject(terminalName)
     if not termModel or not termModel:FindFirstChild("Console") then
         return false, "Terminal offline or unavailable"
     end
@@ -172,14 +188,14 @@ function MazeManager.InteractTerminal(player: Player, terminalName: string): (bo
             end
             
             -- Replicate vault unsealed state
-            player:SetAttribute("MazeVaultUnlocked", true)
+            safeSetAttribute(player, "MazeVaultUnlocked", true)
             
             -- If party mode, update party members
-            local partyId = player:GetAttribute("PartyId")
+            local partyId = typeof(player) == "Instance" and player:GetAttribute("PartyId") or (type(player) == "table" and player.PartyId)
             if partyId and partyId ~= "" then
                 for _, p in ipairs(Players:GetPlayers()) do
                     if p:GetAttribute("PartyId") == partyId then
-                        p:SetAttribute("MazeVaultUnlocked", true)
+                        safeSetAttribute(p, "MazeVaultUnlocked", true)
                         if not run.RewardedPlayers[p.UserId] then
                             run.RewardedPlayers[p.UserId] = true
                             RewardService.GrantReward(p, "PUZZLE SOLVED: CORE ALIGNMENT", 150, 250, "Puzzle_CoreMatrix")
@@ -189,7 +205,7 @@ function MazeManager.InteractTerminal(player: Player, terminalName: string): (bo
             end
             
             -- Visually indicate vault opening in workspace
-            local door = maze:FindFirstChild("BlastDoor_Omega")
+            local door = findMazeObject("BlastDoor_Omega")
             if door then
                 door.Transparency = 0.85
                 door.CanCollide = false
@@ -213,9 +229,7 @@ function MazeManager.ClaimGoldenKey(player: Player): (boolean, string)
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return false, "No character" end
     
-    local maze = workspace.World:FindFirstChild("EscobillosMaze")
-    local vault = maze and maze:FindFirstChild("SecretVault")
-    local keyPart = vault and vault:FindFirstChild("StoryCollectible_GoldenKey")
+    local keyPart = findMazeObject("StoryCollectible_GoldenKey")
     if not keyPart then return false, "Artefact unavailable" end
     
     -- Strict Distance Verification
@@ -270,8 +284,8 @@ function MazeManager.ExtractToNexus(player: Player)
     local char = player.Character
     if char then
         teleportChar(char, Vector3.new(0, 12, 0))
-        player:SetAttribute("MazeCheckpoint", nil)
-        player:SetAttribute("MazeVaultUnlocked", nil)
+        safeSetAttribute(player, "MazeCheckpoint", nil)
+        safeSetAttribute(player, "MazeVaultUnlocked", nil)
         MatchStateNotificationRE:FireClient(player, "Maze", "Extracted", {})
         print(string.format("[MazeManager] Operative %s safely evacuated to Central Nexus.", player.Name))
     end
@@ -279,44 +293,39 @@ end
 
 -- Wire Proximity Prompts
 task.spawn(function()
-    local gateway = workspace.World:WaitForChild("EscobilloGateway", 10)
-    local prompt = gateway and gateway:FindFirstChild("PortalField") and gateway.PortalField:FindFirstChild("PortalPrompt")
-    if prompt then
-        prompt.Triggered:Connect(function(player)
+    local function wirePrompt(inst: Instance?, callback: (Player) -> ())
+        if not inst then return end
+        local p = inst:FindFirstChildOfClass("ProximityPrompt")
+        if p then
+            p.Triggered:Connect(callback)
+        end
+    end
+    
+    local gateway = workspace.World:FindFirstChild("EscobilloGateway")
+    if gateway and gateway:FindFirstChild("PortalField") then
+        wirePrompt(gateway.PortalField, function(player)
             MazeManager.DeployToMaze(player, true)
         end)
     end
     
-    local maze = workspace.World:WaitForChild("EscobillosMaze", 10)
-    local chamber = maze and maze:WaitForChild("PuzzleChamber", 10)
-    if chamber then
-        for _, term in ipairs(chamber:GetChildren()) do
-            local console = term:FindFirstChild("Console")
-            local p = console and console:FindFirstChild("PuzzlePrompt")
-            if p then
-                p.Triggered:Connect(function(player)
-                    MazeManager.InteractTerminal(player, term.Name)
-                end)
-            end
+    for _, name in ipairs(PUZZLE_SEQUENCE) do
+        local term = findMazeObject(name)
+        if term and term:FindFirstChild("Console") then
+            wirePrompt(term.Console, function(player)
+                MazeManager.InteractTerminal(player, name)
+            end)
         end
     end
     
-    local vault = maze and maze:WaitForChild("SecretVault", 10)
-    local keyPart = vault and vault:WaitForChild("StoryCollectible_GoldenKey", 10)
-    local kp = keyPart and keyPart:FindFirstChild("KeyPrompt")
-    if kp then
-        kp.Triggered:Connect(function(player)
-            MazeManager.ClaimGoldenKey(player)
-        end)
-    end
+    local keyPart = findMazeObject("StoryCollectible_GoldenKey")
+    wirePrompt(keyPart, function(player)
+        MazeManager.ClaimGoldenKey(player)
+    end)
     
-    local extractPad = vault and vault:WaitForChild("ExtractionPortal", 10)
-    local ep = extractPad and extractPad:FindFirstChild("ExtractPrompt")
-    if ep then
-        ep.Triggered:Connect(function(player)
-            MazeManager.ExtractToNexus(player)
-        end)
-    end
+    local extractPad = findMazeObject("ExtractionPortal")
+    wirePrompt(extractPad, function(player)
+        MazeManager.ExtractToNexus(player)
+    end)
 end)
 
 -- Remote Invocations
@@ -345,9 +354,7 @@ end
 LeaveMazeQueueRF.OnServerInvoke = function(player: Player)
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local maze = workspace.World:FindFirstChild("EscobillosMaze")
-    local vault = maze and maze:FindFirstChild("SecretVault")
-    local pad = vault and vault:FindFirstChild("ExtractionPortal")
+    local pad = findMazeObject("ExtractionPortal")
     if hrp and pad then
         local dist = (hrp.Position - pad.Position).Magnitude
         if dist > 20.0 then

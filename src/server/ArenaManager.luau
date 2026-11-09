@@ -1,4 +1,4 @@
-﻿-- ArenaManager for NULL FRONTIER
+-- ArenaManager for NULL FRONTIER
 -- Competitive arena match flow, queue staging, spawn allocation, countdown, and reward distribution.
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -14,9 +14,9 @@ local ArenaManager = {}
 local arenaQueue = {} -- array of players
 local isMatchActive = false
 
-local SPAWN_A = Vector3.new(345, 12, 0)
-local SPAWN_B = Vector3.new(415, 12, 0)
-local EXIT_POS = Vector3.new(190, 12, 0)
+local SPAWN_A = Vector3.new(1100, 14, 0)
+local SPAWN_B = Vector3.new(1700, 14, 0)
+local EXIT_POS = Vector3.new(1000, 12, 0)
 
 function ArenaManager.JoinQueue(player: Player): (boolean, string)
     if isMatchActive then return false, "Match currently in progress" end
@@ -95,16 +95,25 @@ function ArenaManager.EndMatch(fighters: table)
     print("[ArenaManager] Apex Arena Round finalized. Rewards distributed.")
 end
 
--- Wire Entrance Prompt
+-- Wire Entrance Prompts
 task.spawn(function()
-    local arenaFolder = workspace.World:WaitForChild("CombatArena", 10)
-    local gate = arenaFolder and arenaFolder:WaitForChild("ArenaEntranceGate", 10)
-    local prompt = gate and gate:WaitForChild("GatePortal", 10) and gate.GatePortal:FindFirstChild("ArenaPrompt")
-    if prompt then
-        prompt.Triggered:Connect(function(player)
-            ArenaManager.JoinQueue(player)
-        end)
+    local function wirePrompt(prompt: ProximityPrompt?)
+        if prompt then
+            prompt.Triggered:Connect(function(player)
+                ArenaManager.JoinQueue(player)
+            end)
+        end
     end
+    
+    local arenaFolder = workspace.World:FindFirstChild("CombatArena")
+    local gate = arenaFolder and arenaFolder:FindFirstChild("ArenaEntranceGate")
+    local prompt = gate and gate:FindFirstChild("GatePortal") and gate.GatePortal:FindFirstChild("ArenaPrompt")
+    wirePrompt(prompt)
+    
+    local titanArena = workspace.World:FindFirstChild("CombatArena_Titan")
+    local queueTerm = titanArena and titanArena:FindFirstChild("ArenaQueueTerminal", true)
+    local titanPrompt = queueTerm and queueTerm:FindFirstChild("Console") and queueTerm.Console:FindFirstChild("ArenaPrompt")
+    wirePrompt(titanPrompt)
 end)
 
 JoinArenaQueueRF.OnServerInvoke = function(player: Player)

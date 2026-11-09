@@ -52,10 +52,6 @@ function MarketplaceManager.ProcessReceipt(receiptInfo)
             purchaseId, productId))
         return Enum.ProductPurchaseDecision.NotProcessedYet
     end
-        print(string.format("[MarketplaceManager] Idempotent hit: Purchase %s already granted to %s at %d.",
-            purchaseId, player.Name, profile.ProcessedPurchases[purchaseId]))
-        return Enum.ProductPurchaseDecision.PurchaseGranted
-    end
     
     -- 5. Product Recognition & Validation
     local rewards = GameConfig.Monetization.ProductRewards or {}

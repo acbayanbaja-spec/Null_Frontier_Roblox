@@ -23,9 +23,11 @@ local MazeManager = require(script.Parent:WaitForChild("MazeManager"))
 local ArenaManager = require(script.Parent:WaitForChild("ArenaManager"))
 
 local CHECKPOINT_COORDS = {
-    Checkpoint_Alpha = Vector3.new(0, 12, -400),
-    Checkpoint_Beta = Vector3.new(-85, 12, -480),
-    Checkpoint_Omega = Vector3.new(85, 12, -560)
+    Checkpoint_Alpha = Vector3.new(0, 14, -850),
+    Checkpoint_Beta = Vector3.new(-250, 14, -1250),
+    Checkpoint_Gamma = Vector3.new(250, 28, -1300),
+    Checkpoint_Delta = Vector3.new(0, -5, -1550),
+    Checkpoint_Omega = Vector3.new(0, 16, -1850)
 }
 
 task.defer(function()
@@ -275,13 +277,19 @@ task.spawn(function()
             local hrp = character and character:FindFirstChild("HumanoidRootPart")
             if hrp then
                 local pos = hrp.Position
-                if pos.Z <= -75 then
+                if pos.X <= -800 and pos.X >= -2000 then
+                    MissionManager.RecordDistrictVisited(player, "FrontierWilds")
+                elseif pos.Z <= -800 and pos.Z >= -2200 then
+                    MissionManager.RecordDistrictVisited(player, "EscobillosMaze")
+                elseif pos.X >= 1000 and pos.X <= 1800 then
+                    MissionManager.RecordDistrictVisited(player, "CombatArena")
+                elseif math.abs(pos.X) <= 120 and pos.Z <= -75 and pos.Z >= -350 then
                     MissionManager.RecordDistrictVisited(player, "CommercialDistrict")
-                elseif pos.Z >= 75 then
+                elseif math.abs(pos.X) <= 120 and pos.Z >= 75 and pos.Z <= 350 then
                     MissionManager.RecordDistrictVisited(player, "FrontierTrainingYard")
-                elseif pos.X >= 75 then
+                elseif pos.X >= 75 and pos.X <= 350 and math.abs(pos.Z) <= 120 then
                     MissionManager.RecordDistrictVisited(player, "TechnologyDistrict")
-                elseif pos.X <= -75 then
+                elseif pos.X <= -75 and pos.X >= -350 and math.abs(pos.Z) <= 120 then
                     MissionManager.RecordDistrictVisited(player, "ResidentialDistrict")
                 end
             end

@@ -1,4 +1,4 @@
-﻿-- EnemyAIManager for NULL FRONTIER
+-- EnemyAIManager for NULL FRONTIER
 -- Original cybernetic AI adversaries with state machine: Patrol -> Chase -> Attack -> Return.
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -100,18 +100,19 @@ local function buildEnemyModel(name: string, spawnPos: Vector3, maxHealth: numbe
     end)
     
     model.PrimaryPart = hrp
-    model.Parent = workspace.World:WaitForChild("EscobillosMaze")
+    local mazeFolder = workspace.World:FindFirstChild("EscobillosMaze_Titan") or workspace.World:FindFirstChild("EscobillosMaze") or workspace.World
+    model.Parent = mazeFolder
     return model
 end
 
 -- Initialize Adversaries
 function EnemyAIManager.Initialize()
-    local maze = workspace.World:WaitForChild("EscobillosMaze")
+    local maze = workspace.World:FindFirstChild("EscobillosMaze_Titan") or workspace.World:WaitForChild("EscobillosMaze", 5)
     
     local enemyConfigs = {
-        { Name = "NullSentinel_1", Spawn = Vector3.new(45, 12, -450), Waypoints = {Vector3.new(45, 12, -430), Vector3.new(45, 12, -500)}, HP = 80, Color = Color3.fromRGB(255, 60, 60), Dmg = 14 },
-        { Name = "NullSentinel_2", Spawn = Vector3.new(-45, 12, -450), Waypoints = {Vector3.new(-45, 12, -430), Vector3.new(-45, 12, -500)}, HP = 80, Color = Color3.fromRGB(255, 60, 60), Dmg = 14 },
-        { Name = "FrontierCorruptor_Alpha", Spawn = Vector3.new(0, 12, -550), Waypoints = {Vector3.new(-25, 12, -550), Vector3.new(25, 12, -550)}, HP = 160, Color = Color3.fromRGB(255, 140, 20), Dmg = 24 },
+        { Name = "NullSentinel_1", Spawn = Vector3.new(-150, 14, -1050), Waypoints = {Vector3.new(-150, 14, -1000), Vector3.new(-150, 14, -1100)}, HP = 80, Color = Color3.fromRGB(255, 60, 60), Dmg = 14 },
+        { Name = "NullSentinel_2", Spawn = Vector3.new(-300, 14, -1250), Waypoints = {Vector3.new(-300, 14, -1200), Vector3.new(-300, 14, -1350)}, HP = 80, Color = Color3.fromRGB(255, 60, 60), Dmg = 14 },
+        { Name = "FrontierCorruptor_Alpha", Spawn = Vector3.new(0, -4, -1600), Waypoints = {Vector3.new(-50, -4, -1600), Vector3.new(50, -4, -1600)}, HP = 160, Color = Color3.fromRGB(255, 140, 20), Dmg = 24 },
     }
     
     for _, cfg in ipairs(enemyConfigs) do

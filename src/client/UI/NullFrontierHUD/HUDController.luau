@@ -262,4 +262,39 @@ updateXP()
 updateLevel()
 updateCredits()
 
+-- Solarpunk Notification Banner Handler
+local banner = mainContainer:FindFirstChild("NotificationBanner")
+local PlayerNotificationRE = Remotes:FindFirstChild("PlayerNotification")
+
+if banner and PlayerNotificationRE then
+    local bTitle = banner:FindFirstChild("BannerTitle")
+    local bMsg = banner:FindFirstChild("BannerMessage")
+    
+    PlayerNotificationRE.OnClientEvent:Connect(function(titleText: string, messageText: string, duration: number?)
+        if not bTitle or not bMsg then return end
+        bTitle.Text = tostring(titleText or "TRANSMISSION"):upper()
+        bMsg.Text = tostring(messageText or "")
+        
+        banner.Visible = true
+        banner.Position = UDim2.new(0.5, 0, 0, -80)
+        
+        TweenService:Create(banner, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Position = UDim2.new(0.5, 0, 0, 20)
+        }):Play()
+        
+        local stayTime = duration or 4.5
+        task.delay(stayTime, function()
+            local hideTw = TweenService:Create(banner, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = UDim2.new(0.5, 0, 0, -90)
+            })
+            hideTw:Play()
+            hideTw.Completed:Connect(function()
+                if banner.Position.Y.Offset <= -80 then
+                    banner.Visible = false
+                end
+            end)
+        end)
+    end)
+end
+
 print("[NullFrontier] HUDController initialized with Compact Solarpunk Dossier.")
