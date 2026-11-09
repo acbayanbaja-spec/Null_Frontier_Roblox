@@ -1,5 +1,5 @@
-﻿-- PlayerManager for NULL FRONTIER
--- Coordinates character lifecycle, progression loading, data persistence, and sector exploration.
+-- PlayerManager for NULL FRONTIER
+-- Coordinates character lifecycle, progression loading, data persistence, and server-authoritative stamina/movement.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -37,8 +37,12 @@ local playerData = {}
 local function setupPlayer(player: Player)
     playerData[player] = {
         LastDamageTime = 0,
-        LastSprintDrain = os.clock(),
+        Stamina = GameConfig.MaxStamina,
+        WantsToSprint = false,
         IsSprinting = false,
+        IsExhausted = false,
+        LastSprintEndTime = os.clock(),
+        LastSprintReqTime = 0,
         LastPos = nil,
     }
     
@@ -48,9 +52,11 @@ local function setupPlayer(player: Player)
     player:SetAttribute("Shield", GameConfig.MaxShield)
     player:SetAttribute("MaxStamina", GameConfig.MaxStamina)
     player:SetAttribute("Stamina", GameConfig.MaxStamina)
+    player:SetAttribute("IsExhausted", false)
+    player:SetAttribute("IsSprinting", false)
     player:SetAttribute("Status", GameConfig.DefaultStatus)
     
-    -- Setup Progression (Loads persistent profile from DataStoreManager)
+    -- Setup Progression (Loads persistent profile from DataStoreManager with session locking)
     ProgressionManager.SetupPlayer(player)
     
     -- Award first join achievement
@@ -83,10 +89,15 @@ local function setupPlayer(player: Player)
         -- Safe respawn resets
         player:SetAttribute("Shield", GameConfig.MaxShield)
         player:SetAttribute("Stamina", GameConfig.MaxStamina)
+        player:SetAttribute("IsExhausted", false)
+        player:SetAttribute("IsSprinting", false)
         player:SetAttribute("Status", GameConfig.DefaultStatus)
         
         if playerData[player] then
+            playerData[player].Stamina = GameConfig.MaxStamina
+            playerData[player].WantsToSprint = false
             playerData[player].IsSprinting = false
+            playerData[player].IsExhausted = false
             playerData[player].LastDamageTime = 0
             playerData[player].LastPos = hrp.Position
         end
@@ -104,8 +115,7 @@ local function setupPlayer(player: Player)
 end
 
 local function cleanupPlayer(player: Player)
-    -- Save persistent profile before releasing session
-    DataStoreManager.SaveProfile(player)
+    -- Save and release session lock cleanly before removing from memory
     DataStoreManager.ReleaseSession(player)
     playerData[player] = nil
 end
@@ -117,23 +127,22 @@ for _, p in ipairs(Players:GetPlayers()) do
     setupPlayer(p)
 end
 
--- Handle Sprint Request from Client
-RequestSprint.OnServerEvent:Connect(function(player: Player, isSprinting: boolean)
+-- Server-Authoritative Sprint Request Handling
+RequestSprint.OnServerEvent:Connect(function(player: Player, wantsToSprint: boolean)
     local data = playerData[player]
     if not data then return end
     
-    local character = player.Character
-    if not character then return end
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then return end
+    local now = os.clock()
+    -- Anti-spam debounce
+    if now - data.LastSprintReqTime < 0.05 then
+        return
+    end
+    data.LastSprintReqTime = now
     
-    local stamina = player:GetAttribute("Stamina") or 0
-    if isSprinting and stamina > 0 then
-        humanoid.WalkSpeed = GameConfig.SprintSpeed
-        data.IsSprinting = true
-    else
-        humanoid.WalkSpeed = GameConfig.WalkSpeed
-        data.IsSprinting = false
+    -- Register intent; server Heartbeat loop strictly validates physics & stamina
+    data.WantsToSprint = (wantsToSprint == true)
+    if not data.WantsToSprint and data.IsSprinting then
+        data.LastSprintEndTime = now
     end
 end)
 
@@ -167,7 +176,7 @@ TestDamage.OnServerEvent:Connect(function(player: Player, amount: number)
     applyDamage(player, safeAmount)
 end)
 
--- Heartbeat loop for Shield Regeneration & Sprint Distance Tracking
+-- Heartbeat loop: Server-Authoritative Stamina, Shield Regen & Anti-Cheat WalkSpeed Enforcement
 local distanceAccumulator = 0
 RunService.Heartbeat:Connect(function(dt)
     local now = os.clock()
@@ -179,7 +188,13 @@ RunService.Heartbeat:Connect(function(dt)
             local humanoid = character:FindFirstChildOfClass("Humanoid")
             local hrp = character:FindFirstChild("HumanoidRootPart")
             if humanoid and humanoid.Health > 0 and hrp then
-                -- Shield Regen
+                -- Menu check
+                if player:GetAttribute("InMenu") == true then
+                    if humanoid.WalkSpeed ~= 0 then humanoid.WalkSpeed = 0 end
+                    continue
+                end
+                
+                -- 1. Shield Regeneration
                 if now - data.LastDamageTime >= GameConfig.ShieldRegenDelay then
                     local currentShield = player:GetAttribute("Shield") or 0
                     local maxShield = player:GetAttribute("MaxShield") or GameConfig.MaxShield
@@ -189,7 +204,56 @@ RunService.Heartbeat:Connect(function(dt)
                     end
                 end
                 
-                -- Sprint Distance Measurement
+                -- 2. Server-Authoritative Stamina Simulation
+                local isMoving = humanoid.MoveDirection.Magnitude > 0.05
+                local canSprint = data.WantsToSprint and isMoving and not data.IsExhausted and data.Stamina > 0
+                
+                if canSprint then
+                    -- Drain Stamina on Server
+                    data.Stamina = math.max(0, data.Stamina - (GameConfig.StaminaDrainRate * dt))
+                    data.IsSprinting = true
+                    humanoid.WalkSpeed = GameConfig.SprintSpeed
+                    
+                    if data.Stamina <= 0 then
+                        -- Exhaustion Triggered on Server
+                        data.IsExhausted = true
+                        data.IsSprinting = false
+                        data.WantsToSprint = false
+                        data.LastSprintEndTime = now
+                        humanoid.WalkSpeed = GameConfig.WalkSpeed
+                    end
+                else
+                    -- Resting / Normal Walk
+                    data.IsSprinting = false
+                    if humanoid.WalkSpeed > GameConfig.SprintSpeed then
+                        -- Enforce maximum speed ceiling against speed exploits
+                        humanoid.WalkSpeed = GameConfig.SprintSpeed
+                    elseif humanoid.WalkSpeed ~= GameConfig.WalkSpeed then
+                        humanoid.WalkSpeed = GameConfig.WalkSpeed
+                    end
+                    
+                    if not data.WantsToSprint and data.LastSprintEndTime == 0 then
+                        data.LastSprintEndTime = now
+                    end
+                    
+                    -- Server Stamina Regeneration
+                    if now - data.LastSprintEndTime >= GameConfig.StaminaRegenDelay then
+                        if data.Stamina < GameConfig.MaxStamina then
+                            data.Stamina = math.min(GameConfig.MaxStamina, data.Stamina + (GameConfig.StaminaRegenRate * dt))
+                        end
+                        -- Recover from exhaustion once above minimum sprint stamina threshold
+                        if data.IsExhausted and data.Stamina >= GameConfig.MinSprintStamina then
+                            data.IsExhausted = false
+                        end
+                    end
+                end
+                
+                -- Replicate Authoritative Values
+                player:SetAttribute("Stamina", math.floor(data.Stamina * 10) / 10)
+                player:SetAttribute("IsExhausted", data.IsExhausted)
+                player:SetAttribute("IsSprinting", data.IsSprinting)
+                
+                -- 3. Sprint Distance Measurement for Missions
                 if data.IsSprinting and data.LastPos then
                     local dist = (hrp.Position - data.LastPos).Magnitude
                     if dist > 0.1 and dist < 50 then -- Sanity filter against teleports
@@ -225,4 +289,4 @@ task.spawn(function()
     end
 end)
 
-print("[NullFrontier] PlayerManager initialized (Full Progression + Missions + DataStore Persistence).")
+print("[NullFrontier] PlayerManager initialized (Authoritative Stamina + Session-Locking + Full Progression).")

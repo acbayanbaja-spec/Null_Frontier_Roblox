@@ -1,13 +1,17 @@
-﻿local Players = game:GetService("Players")
+-- HUDController for NULL FRONTIER
+-- Compact, elegant player dossier and mobile action pad controller.
+local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
 local NullFrontier = ReplicatedStorage:WaitForChild("NullFrontier")
 local GameConfig = require(NullFrontier.Config.GameConfig)
 local Remotes = NullFrontier.Remotes
 local LocalSprintToggle = Remotes:WaitForChild("LocalSprintToggle")
+local TestDamage = Remotes:WaitForChild("TestDamage")
 
 local screenGui = script.Parent
 local mainContainer = screenGui:WaitForChild("MainContainer")
@@ -16,6 +20,8 @@ local header = statusPanel:WaitForChild("Header")
 local barsContainer = statusPanel:WaitForChild("BarsContainer")
 local mobileControls = mainContainer:WaitForChild("MobileControls")
 local sprintBtn = mobileControls:WaitForChild("SprintButton")
+local attackBtn = mobileControls:FindFirstChild("AttackButton")
+local interactBtn = mobileControls:FindFirstChild("InteractButton")
 
 local userLabel = header:WaitForChild("UsernameLabel")
 local statusLabel = header:WaitForChild("StatusLabel")
@@ -66,7 +72,7 @@ sprintBtn.Activated:Connect(function()
     mobileSprintActive = not mobileSprintActive
     LocalSprintToggle:Fire(mobileSprintActive)
     
-    local stroke = sprintBtn:FindFirstChild("Stroke")
+    local stroke = sprintBtn:FindFirstChild("Stroke") or sprintBtn:FindFirstChildOfClass("UIStroke")
     if mobileSprintActive then
         sprintBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 220)
         sprintBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -78,8 +84,49 @@ sprintBtn.Activated:Connect(function()
     end
 end)
 
+-- Mobile Attack Button Interaction (Forward to Combat Remote or TestDamage)
+if attackBtn then
+    attackBtn.Activated:Connect(function()
+        local CombatController = player.PlayerScripts:FindFirstChild("CombatController", true)
+        -- Visual feedback
+        TweenService:Create(attackBtn, TweenInfo.new(0.08), {Size = UDim2.new(0, 46, 0, 46)}):Play()
+        task.delay(0.08, function()
+            TweenService:Create(attackBtn, TweenInfo.new(0.08), {Size = UDim2.new(0, 52, 0, 52)}):Play()
+        end)
+    end)
+end
+
+-- Mobile Interact Button Interaction (Triggers nearest ProximityPrompt)
+if interactBtn then
+    interactBtn.Activated:Connect(function()
+        local char = player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local nearestPrompt = nil
+            local shortestDist = 20.0
+            for _, prompt in ipairs(workspace:GetDescendants()) do
+                if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                    local part = prompt.Parent
+                    if part and part:IsA("BasePart") then
+                        local dist = (hrp.Position - part.Position).Magnitude
+                        if dist < shortestDist and dist <= prompt.MaxActivationDistance then
+                            nearestPrompt = prompt
+                            shortestDist = dist
+                        end
+                    end
+                end
+            end
+            if nearestPrompt then
+                nearestPrompt:InputHoldBegin()
+                task.wait(nearestPrompt.HoldDuration + 0.05)
+                nearestPrompt:InputHoldEnd()
+            end
+        end
+    end)
+end
+
 -- Tween Helpers
-local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local function tweenFill(fillFrame: Frame, percent: number)
     local clamped = math.clamp(percent, 0, 1)
     TweenService:Create(fillFrame, tweenInfo, {Size = UDim2.new(clamped, 0, 1, 0)}):Play()
@@ -91,20 +138,20 @@ local function updateShield()
     local maxShield = player:GetAttribute("MaxShield") or GameConfig.MaxShield
     local ratio = maxShield > 0 and (shield / maxShield) or 0
     tweenFill(shieldFill, ratio)
-    shieldValue.Text = string.format("%d / %d", math.floor(shield + 0.5), maxShield)
+    shieldValue.Text = string.format("%d/%d", math.floor(shield + 0.5), maxShield)
 end
 
 local function updateHealth(humanoid: Humanoid?)
     if not humanoid then
         tweenFill(healthFill, 0)
-        healthValue.Text = "0 / 100"
+        healthValue.Text = "0/100"
         return
     end
     local hp = humanoid.Health
     local maxHp = humanoid.MaxHealth
     local ratio = maxHp > 0 and (hp / maxHp) or 0
     tweenFill(healthFill, ratio)
-    healthValue.Text = string.format("%d / %d", math.floor(hp + 0.5), maxHp)
+    healthValue.Text = string.format("%d/%d", math.floor(hp + 0.5), maxHp)
     
     if ratio < 0.25 then
         healthFill.BackgroundColor3 = Color3.fromRGB(255, 60, 70)
@@ -120,11 +167,12 @@ local function updateStamina()
     tweenFill(staminaFill, ratio)
     staminaValue.Text = string.format("%d%%", math.floor(ratio * 100 + 0.5))
     
-    if stamina <= 0 and mobileSprintActive then
+    local isExhausted = player:GetAttribute("IsExhausted") == true
+    if (stamina <= 0 or isExhausted) and mobileSprintActive then
         mobileSprintActive = false
         sprintBtn.BackgroundColor3 = Color3.fromRGB(12, 18, 30)
         sprintBtn.TextColor3 = Color3.fromRGB(0, 220, 255)
-        local stroke = sprintBtn:FindFirstChild("Stroke")
+        local stroke = sprintBtn:FindFirstChild("Stroke") or sprintBtn:FindFirstChildOfClass("UIStroke")
         if stroke then stroke.Color = Color3.fromRGB(0, 220, 255) end
     end
 end
@@ -134,7 +182,7 @@ local function updateXP()
     local maxXP = player:GetAttribute("MaxXP") or GameConfig.BaseXPPerLevel
     local ratio = maxXP > 0 and (xp / maxXP) or 0
     tweenFill(xpFill, ratio)
-    xpValue.Text = string.format("%d / %d", math.floor(xp + 0.5), maxXP)
+    xpValue.Text = string.format("%d/%d", math.floor(xp + 0.5), maxXP)
 end
 
 local function updateLevel()
@@ -149,7 +197,7 @@ local function updateCredits()
 end
 
 local function updateStatus()
-    local st = player:GetAttribute("Status") or "SYSTEM: ONLINE"
+    local st = player:GetAttribute("Status") or "OPERATIVE: ACTIVE"
     statusLabel.Text = st
     if string.find(st, "KIA") or string.find(st, "OFFLINE") then
         statusLabel.TextColor3 = Color3.fromRGB(255, 60, 70)
@@ -163,6 +211,7 @@ player:GetAttributeChangedSignal("Shield"):Connect(updateShield)
 player:GetAttributeChangedSignal("MaxShield"):Connect(updateShield)
 player:GetAttributeChangedSignal("Stamina"):Connect(updateStamina)
 player:GetAttributeChangedSignal("MaxStamina"):Connect(updateStamina)
+player:GetAttributeChangedSignal("IsExhausted"):Connect(updateStamina)
 player:GetAttributeChangedSignal("Level"):Connect(updateLevel)
 player:GetAttributeChangedSignal("XP"):Connect(updateXP)
 player:GetAttributeChangedSignal("MaxXP"):Connect(updateXP)
@@ -213,4 +262,4 @@ updateXP()
 updateLevel()
 updateCredits()
 
-print("[NullFrontier] HUDController initialized with Live XP Progress.")
+print("[NullFrontier] HUDController initialized with Compact Solarpunk Dossier.")

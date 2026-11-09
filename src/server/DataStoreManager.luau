@@ -1,24 +1,41 @@
-﻿-- DataStoreManager for NULL FRONTIER
--- Production-grade, resilient, session-locked persistence engine.
+-- DataStoreManager for NULL FRONTIER
+-- Production-grade, cross-server session-locked persistence engine.
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local NullFrontier = ReplicatedStorage:WaitForChild("NullFrontier")
+local GameConfig = require(NullFrontier.Config.GameConfig)
 
 local DATA_VERSION = 1
 local DATASTORE_NAME = "NullFrontier_PlayerData_v" .. tostring(DATA_VERSION)
 local MAX_RETRIES = 3
 local RETRY_BACKOFF = {1.0, 2.0, 4.0}
+local SESSION_LOCK_DURATION = GameConfig.SessionLockDuration or 1200 -- 20 minutes
 
 local DataStoreManager = {}
 
 -- State caches
-local activeSessions = {}     -- player -> profile table
-local sessionLoaded = {}      -- player -> boolean (true if successfully loaded)
+local activeSessions = {}     -- userId (number) | player -> profile table
+local sessionLoaded = {}      -- userId (number) | player -> boolean
 local isDataStoreAvailable = true
-local studioMockStore = {}    -- key -> serialized JSON string (for offline / Studio testing)
+local studioMockStore = {}    -- key -> serialized JSON string (with full session lock simulation)
 
--- Attempt to probe DataStore availability safely
+-- Safe helper to resolve Player or UserId or Mock table
+local function resolvePlayer(target: any): (number, string)
+    if typeof(target) == "Instance" and target:IsA("Player") then
+        return target.UserId, target.Name
+    elseif type(target) == "table" and target.UserId then
+        return target.UserId, target.Name or tostring(target.UserId)
+    elseif type(target) == "number" then
+        return target, tostring(target)
+    end
+    return 0, "Unknown"
+end
+
+-- Probe DataStore availability safely
 local probeSuccess, probeErr = pcall(function()
     local ds = DataStoreService:GetDataStore("NullFrontier_SystemProbe")
     ds:GetAsync("__probe__")
@@ -28,19 +45,25 @@ if not probeSuccess then
     warn(string.format("[DataStoreManager] Live DataStore API not accessible (%s). Operating in High-Fidelity Session Mock Mode.", tostring(probeErr)))
     isDataStoreAvailable = false
 else
-    print("[DataStoreManager] Live DataStore API confirmed accessible.")
+    print("[DataStoreManager] Live DataStore API confirmed accessible with Session-Locking active.")
 end
 
 -- Default Operative Template
-function DataStoreManager.GetDefaultProfile(player: Player)
+function DataStoreManager.GetDefaultProfile(player: any)
+    local userId, playerName = resolvePlayer(player)
     return {
         Version = DATA_VERSION,
         CreatedTime = os.time(),
         LastSaved = os.time(),
+        Session = {
+            LockJobId = game.JobId,
+            LockTime = os.time()
+        },
         Level = 1,
         XP = 0,
         LifetimeXP = 0,
         Credits = 0,
+        ProcessedPurchases = {},
         Missions = {
             ["DAILY_PATROL"] = { Progress = 0, Target = 250, Completed = false, Claimed = false, ResetTimestamp = os.time() + 86400 },
             ["DAILY_COMM"] = { Progress = 0, Target = 1, Completed = false, Claimed = false, ResetTimestamp = os.time() + 86400 },
@@ -75,7 +98,7 @@ function DataStoreManager.GetDefaultProfile(player: Player)
     }
 end
 
--- Data Reconciler (Upgrades existing profiles to current schema seamlessly)
+-- Data Reconciler
 local function reconcileData(savedData: table, template: table): table
     for k, v in pairs(template) do
         if savedData[k] == nil then
@@ -95,142 +118,227 @@ local function reconcileData(savedData: table, template: table): table
     return savedData
 end
 
--- Load Profile with exponential retries and failure containment
-function DataStoreManager.LoadProfile(player: Player): (table, boolean)
-    local key = "Operative_" .. tostring(player.UserId)
-    local loadedData = nil
-    local success = false
-    
-    if isDataStoreAvailable then
-        local store = DataStoreService:GetDataStore(DATASTORE_NAME)
-        for attempt = 1, MAX_RETRIES do
-            local opSuccess, result = pcall(function()
-                return store:GetAsync(key)
-            end)
-            
-            if opSuccess then
-                loadedData = result
-                success = true
-                break
-            else
-                warn(string.format("[DataStoreManager] GetAsync attempt %d failed for %s: %s", attempt, player.Name, tostring(result)))
-                if attempt < MAX_RETRIES then
-                    task.wait(RETRY_BACKOFF[attempt] or 1.0)
-                end
-            end
+-- Mock UpdateAsync Implementation for Studio / Offline
+local function mockUpdateAsync(key: string, transformFunc: (any) -> any): (boolean, any)
+    local raw = studioMockStore[key]
+    local existing = nil
+    if raw then
+        local decSuccess, parsed = pcall(function() return HttpService:JSONDecode(raw) end)
+        if decSuccess then
+            existing = parsed
         end
-    else
-        -- Use Mock Store
-        local raw = studioMockStore[key]
-        if raw then
-            local decSuccess, parsed = pcall(function() return HttpService:JSONDecode(raw) end)
-            if decSuccess then
-                loadedData = parsed
-            end
-        end
-        success = true
     end
     
-    if not success then
-        -- Critical failure: do NOT overwrite with defaults. Mark as unloaded/read-only
-        sessionLoaded[player] = false
-        warn(string.format("[DataStoreManager] FATAL: Unable to load data for %s after %d retries. Profile protected in read-only state.", player.Name, MAX_RETRIES))
-        local emergencyFallback = DataStoreManager.GetDefaultProfile(player)
-        activeSessions[player] = emergencyFallback
-        return emergencyFallback, false
+    local updated = transformFunc(existing)
+    if updated ~= nil then
+        studioMockStore[key] = HttpService:JSONEncode(updated)
+        return true, updated
     end
-    
-    local finalProfile = nil
-    if loadedData ~= nil and type(loadedData) == "table" then
-        finalProfile = reconcileData(loadedData, DataStoreManager.GetDefaultProfile(player))
-        print(string.format("[DataStoreManager] Successfully loaded existing profile for %s (Level %d, %d Credits).", player.Name, finalProfile.Level, finalProfile.Credits))
-    else
-        finalProfile = DataStoreManager.GetDefaultProfile(player)
-        print(string.format("[DataStoreManager] Initialized fresh profile for operative %s.", player.Name))
-    end
-    
-    activeSessions[player] = finalProfile
-    activeSessions[player.UserId] = finalProfile
-    sessionLoaded[player] = true
-    sessionLoaded[player.UserId] = true
-    return finalProfile, true
+    return false, "Aborted by transform function or session lock conflict"
 end
 
--- Save Profile with serialization and safe retry
-function DataStoreManager.SaveProfile(player: Player): boolean
-    if sessionLoaded[player] == false then
-        warn(string.format("[DataStoreManager] SKIPPED save for %s: Session was not loaded cleanly (Protection Against Data Corruption active).", player.Name))
-        return false
-    end
-    
-    local profile = activeSessions[player] or (player and activeSessions[player.UserId])
-    if not profile then return false end
-    
-    profile.LastSaved = os.time()
-    local key = "Operative_" .. tostring(player.UserId)
-    
-    if not isDataStoreAvailable then
-        -- Mock persistence across in-studio tests
-        studioMockStore[key] = HttpService:JSONEncode(profile)
-        return true
-    end
-    
-    local store = DataStoreService:GetDataStore(DATASTORE_NAME)
-    local saveSuccess = false
+-- Load Profile with Session-Locking via UpdateAsync
+function DataStoreManager.LoadProfile(player: any): (table, boolean)
+    local userId, playerName = resolvePlayer(player)
+    local key = "Operative_" .. tostring(userId)
+    local finalProfile = nil
+    local lockConflict = false
+    local store = isDataStoreAvailable and DataStoreService:GetDataStore(DATASTORE_NAME) or nil
     
     for attempt = 1, MAX_RETRIES do
-        local opSuccess, err = pcall(function()
-            store:SetAsync(key, profile)
-        end)
+        local opSuccess, result
+        if isDataStoreAvailable and store then
+            opSuccess, result = pcall(function()
+                return store:UpdateAsync(key, function(existing)
+                    local now = os.time()
+                    if existing ~= nil and type(existing) == "table" then
+                        if existing.Session and existing.Session.LockJobId and existing.Session.LockJobId ~= game.JobId then
+                            local lockAge = now - (existing.Session.LockTime or 0)
+                            if lockAge < SESSION_LOCK_DURATION then
+                                lockConflict = true
+                                return nil
+                            else
+                                warn(string.format("[DataStoreManager] Overriding expired session lock (age: %ds) for %s from JobId %s.",
+                                    lockAge, playerName, tostring(existing.Session.LockJobId)))
+                            end
+                        end
+                        existing.Session = {
+                            LockJobId = game.JobId,
+                            LockTime = now
+                        }
+                        return existing
+                    else
+                        local fresh = DataStoreManager.GetDefaultProfile(player)
+                        fresh.Session = {
+                            LockJobId = game.JobId,
+                            LockTime = now
+                        }
+                        return fresh
+                    end
+                end)
+            end)
+        else
+            opSuccess, result = mockUpdateAsync(key, function(existing)
+                local now = os.time()
+                if existing ~= nil and type(existing) == "table" then
+                    if existing.Session and existing.Session.LockJobId and existing.Session.LockJobId ~= game.JobId then
+                        local lockAge = now - (existing.Session.LockTime or 0)
+                        if lockAge < SESSION_LOCK_DURATION then
+                            lockConflict = true
+                            return nil
+                        end
+                    end
+                    existing.Session = { LockJobId = game.JobId, LockTime = now }
+                    return existing
+                else
+                    local fresh = DataStoreManager.GetDefaultProfile(player)
+                    fresh.Session = { LockJobId = game.JobId, LockTime = now }
+                    return fresh
+                end
+            end)
+        end
         
-        if opSuccess then
-            saveSuccess = true
+        if opSuccess and result ~= nil then
+            finalProfile = reconcileData(result, DataStoreManager.GetDefaultProfile(player))
+            break
+        elseif lockConflict then
+            warn(string.format("[DataStoreManager] SESSION CONFLICT: Operative %s profile is currently locked by another active server.", playerName))
             break
         else
-            warn(string.format("[DataStoreManager] SetAsync attempt %d failed for %s: %s", attempt, player.Name, tostring(err)))
+            warn(string.format("[DataStoreManager] UpdateAsync load attempt %d failed for %s: %s", attempt, playerName, tostring(result)))
             if attempt < MAX_RETRIES then
                 task.wait(RETRY_BACKOFF[attempt] or 1.0)
             end
         end
     end
     
+    if finalProfile == nil then
+        sessionLoaded[player] = false
+        sessionLoaded[userId] = false
+        warn(string.format("[DataStoreManager] CRITICAL: Profile load failed for %s. Operating in read-only quarantine.", playerName))
+        local fallback = DataStoreManager.GetDefaultProfile(player)
+        fallback.Session = nil
+        activeSessions[player] = fallback
+        activeSessions[userId] = fallback
+        return fallback, false
+    end
+    
+    activeSessions[player] = finalProfile
+    activeSessions[userId] = finalProfile
+    sessionLoaded[player] = true
+    sessionLoaded[userId] = true
+    print(string.format("[DataStoreManager] Session lock acquired for %s (JobId: %s, Level %d, %d CR).",
+        playerName, game.JobId, finalProfile.Level, finalProfile.Credits))
+    return finalProfile, true
+end
+
+-- Save Profile with Session-Lock Verification via UpdateAsync
+function DataStoreManager.SaveProfile(player: any, isReleasing: boolean?): boolean
+    local userId, playerName = resolvePlayer(player)
+    
+    if sessionLoaded[userId] ~= true and sessionLoaded[player] ~= true then
+        warn(string.format("[DataStoreManager] SKIPPED save for %s: Session was not loaded cleanly (Protection Against Data Corruption active).", playerName))
+        return false
+    end
+    
+    local profile = activeSessions[player] or activeSessions[userId]
+    if not profile then
+        warn(string.format("[DataStoreManager] SKIPPED save for %s: No active session profile found in memory.", playerName))
+        return false
+    end
+    
+    profile.LastSaved = os.time()
+    local key = "Operative_" .. tostring(userId)
+    local saveSuccess = false
+    local store = isDataStoreAvailable and DataStoreService:GetDataStore(DATASTORE_NAME) or nil
+    
+    for attempt = 1, MAX_RETRIES do
+        local opSuccess, result
+        if isDataStoreAvailable and store then
+            opSuccess, result = pcall(function()
+                return store:UpdateAsync(key, function(existing)
+                    local now = os.time()
+                    if existing and existing.Session and existing.Session.LockJobId and existing.Session.LockJobId ~= game.JobId then
+                        local lockAge = now - (existing.Session.LockTime or 0)
+                        if lockAge < SESSION_LOCK_DURATION then
+                            warn(string.format("[DataStoreManager] Session ownership lost during save for %s! Aborting write.", playerName))
+                            return nil
+                        end
+                    end
+                    
+                    if isReleasing then
+                        profile.Session = nil
+                    else
+                        profile.Session = {
+                            LockJobId = game.JobId,
+                            LockTime = now
+                        }
+                    end
+                    return profile
+                end)
+            end)
+        else
+            opSuccess, result = mockUpdateAsync(key, function(existing)
+                local now = os.time()
+                if existing and existing.Session and existing.Session.LockJobId and existing.Session.LockJobId ~= game.JobId then
+                    local lockAge = now - (existing.Session.LockTime or 0)
+                    if lockAge < SESSION_LOCK_DURATION then
+                        return nil
+                    end
+                end
+                if isReleasing then
+                    profile.Session = nil
+                else
+                    profile.Session = { LockJobId = game.JobId, LockTime = now }
+                end
+                return profile
+            end)
+        end
+        
+        if opSuccess and result ~= nil then
+            saveSuccess = true
+            break
+        else
+            warn(string.format("[DataStoreManager] UpdateAsync save attempt %d failed for %s: %s", attempt, playerName, tostring(result)))
+            if attempt < MAX_RETRIES then
+                task.wait(RETRY_BACKOFF[attempt] or 1.0)
+            end
+        end
+    end
+    
+    if saveSuccess then
+        print(string.format("[DataStoreManager] Confirmed save for %s (Releasing: %s).", playerName, tostring(isReleasing == true)))
+    else
+        warn(string.format("[DataStoreManager] FAILED to save profile for %s after %d retries.", playerName, MAX_RETRIES))
+    end
     return saveSuccess
 end
 
-function DataStoreManager.GetSessionData(player: Player | number): table?
-    if type(player) == "number" then
-        return activeSessions[player]
-    elseif typeof(player) == "Instance" and player:IsA("Player") then
-        return activeSessions[player] or activeSessions[player.UserId]
-    end
-    return nil
+function DataStoreManager.GetSessionData(player: any): table?
+    local userId = resolvePlayer(player)
+    return activeSessions[player] or activeSessions[userId]
 end
 
-function DataStoreManager.ReleaseSession(player: Player | number)
-    if typeof(player) == "Instance" and player:IsA("Player") then
-        activeSessions[player] = nil
-        activeSessions[player.UserId] = nil
-        sessionLoaded[player] = nil
-        sessionLoaded[player.UserId] = nil
-    elseif type(player) == "number" then
-        activeSessions[player] = nil
-        sessionLoaded[player] = nil
-    end
+function DataStoreManager.ReleaseSession(player: any)
+    local userId, playerName = resolvePlayer(player)
+    
+    DataStoreManager.SaveProfile(player, true)
+    
+    activeSessions[player] = nil
+    activeSessions[userId] = nil
+    sessionLoaded[player] = nil
+    sessionLoaded[userId] = nil
+    print(string.format("[DataStoreManager] Session lock cleanly released for %s.", playerName))
 end
 
--- Studio Testing Helper: Enable/Disable mock data inspection
-function DataStoreManager.GetMockStoreDump(): table
-    return studioMockStore
-end
-
--- Auto-Save Loop (Runs every 300 seconds)
+-- Periodic Auto-Save Loop
 task.spawn(function()
     while true do
         task.wait(300)
         local count = 0
         for player, _ in pairs(activeSessions) do
             if typeof(player) == "Instance" and player:IsA("Player") and player.Parent then
-                DataStoreManager.SaveProfile(player)
+                DataStoreManager.SaveProfile(player, false)
                 count = count + 1
             end
         end
@@ -240,21 +348,44 @@ task.spawn(function()
     end
 end)
 
--- BindToClose: Flush all online players before server shuts down
+-- BindToClose
 game:BindToClose(function()
-    print("[DataStoreManager] Server shutdown initiated. Flushing all operative profiles...")
-    local threads = {}
+    print("[DataStoreManager] Server shutdown initiated. Synchronizing all active operative profiles...")
+    local pendingPlayers = {}
     for player, _ in pairs(activeSessions) do
         if typeof(player) == "Instance" and player:IsA("Player") then
-            local t = task.spawn(function()
-                DataStoreManager.SaveProfile(player)
-            end)
-            table.insert(threads, t)
+            table.insert(pendingPlayers, player)
         end
     end
     
-    task.wait(1.5) -- Give async calls time to finalize
-    print("[DataStoreManager] All operative profiles successfully synchronized.")
+    local remaining = #pendingPlayers
+    if remaining == 0 then
+        print("[DataStoreManager] No active profiles to flush.")
+        return
+    end
+    
+    for _, player in ipairs(pendingPlayers) do
+        task.spawn(function()
+            local ok = DataStoreManager.SaveProfile(player, true)
+            if ok then
+                print(string.format("[DataStoreManager] Shutdown flush confirmed for %s.", player.Name))
+            else
+                warn(string.format("[DataStoreManager] Shutdown flush error for %s.", player.Name))
+            end
+            remaining = remaining - 1
+        end)
+    end
+    
+    local waitStart = os.clock()
+    while remaining > 0 and (os.clock() - waitStart) < 25 do
+        task.wait(0.1)
+    end
+    print(string.format("[DataStoreManager] Server shutdown save completed. (%d remaining, elapsed: %.2fs)",
+        remaining, os.clock() - waitStart))
 end)
+
+function DataStoreManager.GetMockStoreDump(): table
+    return studioMockStore
+end
 
 return DataStoreManager

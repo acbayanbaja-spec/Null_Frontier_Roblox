@@ -1,4 +1,4 @@
-﻿local Players = game:GetService("Players")
+local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local Lighting = game:GetService("Lighting")
@@ -311,8 +311,13 @@ playBtn.Activated:Connect(function()
         camTw:Play()
         camTw.Completed:Wait()
         
+        player.CameraMinZoomDistance = 6
+        player.CameraMaxZoomDistance = 12
         camera.CameraType = Enum.CameraType.Custom
         camera.CameraSubject = hum
+        task.delay(0.3, function()
+            player.CameraMaxZoomDistance = 14
+        end)
     end
     
     -- Remove Menu Blur

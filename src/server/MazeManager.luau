@@ -1,9 +1,8 @@
-﻿-- MazeManager for NULL FRONTIER
--- Match flow, party synchronization, checkpoint recovery, puzzle sequence, and story objectives.
+-- MazeManager for NULL FRONTIER
+-- Match flow, party-isolated run state, checkpoint recovery, puzzle sequence, and story objectives.
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 
 local NullFrontier = ReplicatedStorage:WaitForChild("NullFrontier")
 local Remotes = NullFrontier.Remotes
@@ -21,10 +20,35 @@ local CHECKPOINT_COORDS = {
     Checkpoint_Omega = Vector3.new(85, 12, -560)
 }
 
--- Puzzle State
-local puzzleSequence = {"Terminal_Alpha", "Terminal_Beta", "Terminal_Gamma"}
-local currentPuzzleStep = 1
-local isVaultUnlocked = false
+local PUZZLE_SEQUENCE = {"Terminal_Alpha", "Terminal_Beta", "Terminal_Gamma"}
+
+-- Isolated Party / Player Run State Cache
+-- Key: partyId (string) or "Solo_" .. userId
+local activeRuns = {}
+
+local function getRunKey(player: Player): string
+    local partyId = player:GetAttribute("PartyId")
+    if partyId and partyId ~= "" then
+        return "Party_" .. tostring(partyId)
+    end
+    return "Solo_" .. tostring(player.UserId)
+end
+
+function MazeManager.GetRunState(player: Player): table
+    local key = getRunKey(player)
+    if not activeRuns[key] then
+        activeRuns[key] = {
+            RunId = key,
+            PuzzleStep = 1,
+            IsVaultUnlocked = false,
+            RewardedPlayers = {},      -- userId -> boolean
+            GoldenKeyClaimed = {},     -- userId -> boolean
+            DeployedAt = os.time(),
+            LastInteraction = os.time()
+        }
+    end
+    return activeRuns[key]
+end
 
 -- Teleport Player Safely
 local function teleportChar(char: Model, targetPos: Vector3)
@@ -34,16 +58,15 @@ local function teleportChar(char: Model, targetPos: Vector3)
 end
 
 -- 1. Deploy Player / Party into Maze
-function MazeManager.DeployToMaze(player: Player, partyMode: boolean)
+function MazeManager.DeployToMaze(player: Player, partyMode: boolean): (boolean, string)
     local char = player.Character
     if not char then return false, "No operative character" end
     
     local playersToDeploy = {player}
     
     if partyMode then
-        local SocialManager = require(script.Parent:WaitForChild("SocialManager"))
         local partyId = player:GetAttribute("PartyId")
-        if partyId then
+        if partyId and partyId ~= "" then
             for _, p in ipairs(Players:GetPlayers()) do
                 if p ~= player and p:GetAttribute("PartyId") == partyId then
                     table.insert(playersToDeploy, p)
@@ -52,12 +75,25 @@ function MazeManager.DeployToMaze(player: Player, partyMode: boolean)
         end
     end
     
+    -- Initialize or reset fresh run state for this party
+    local runKey = getRunKey(player)
+    activeRuns[runKey] = {
+        RunId = runKey,
+        PuzzleStep = 1,
+        IsVaultUnlocked = false,
+        RewardedPlayers = {},
+        GoldenKeyClaimed = {},
+        DeployedAt = os.time(),
+        LastInteraction = os.time()
+    }
+    
     for _, p in ipairs(playersToDeploy) do
         if p.Character then
             teleportChar(p.Character, CHECKPOINT_COORDS.Checkpoint_Alpha)
             p:SetAttribute("MazeCheckpoint", "Checkpoint_Alpha")
+            p:SetAttribute("MazeVaultUnlocked", false)
             MatchStateNotificationRE:FireClient(p, "Maze", "Deployed", { Checkpoint = "Checkpoint_Alpha" })
-            print(string.format("[MazeManager] Deployed operative %s to Checkpoint Alpha.", p.Name))
+            print(string.format("[MazeManager] Deployed operative %s to Checkpoint Alpha (Run: %s).", p.Name, runKey))
         end
     end
     
@@ -93,80 +129,85 @@ task.spawn(function()
     end
 end)
 
--- 3. Core Alignment Puzzle Logic
+-- 3. Isolated Core Alignment Puzzle Logic
 function MazeManager.InteractTerminal(player: Player, terminalName: string): (boolean, string)
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return false, "No character" end
     
-    if isVaultUnlocked then
-        return true, "Core Matrix already aligned. Blast Door unsealed."
+    local run = MazeManager.GetRunState(player)
+    run.LastInteraction = os.time()
+    
+    if run.IsVaultUnlocked then
+        return true, "Core Matrix already aligned for your squad. Blast Door unsealed."
     end
     
-    local expectedTerminal = puzzleSequence[currentPuzzleStep]
     local maze = workspace.World:FindFirstChild("EscobillosMaze")
     local chamber = maze and maze:FindFirstChild("PuzzleChamber")
     local termModel = chamber and chamber:FindFirstChild(terminalName)
     if not termModel or not termModel:FindFirstChild("Console") then
         return false, "Terminal offline or unavailable"
     end
+    
+    -- Strict Distance Verification
     local dist = (hrp.Position - termModel.Console.Position).Magnitude
     if dist > 18.0 then
         return false, "Operative is too far from terminal console"
     end
     
+    local expectedTerminal = PUZZLE_SEQUENCE[run.PuzzleStep]
     if terminalName == expectedTerminal then
-        -- Correct Step
-        if termModel and termModel:FindFirstChild("Console") then
-            termModel.Console.Color = Color3.fromRGB(0, 255, 160)
-        end
-        currentPuzzleStep = currentPuzzleStep + 1
+        -- Correct Step in Sequence
+        run.PuzzleStep = run.PuzzleStep + 1
         
-        if currentPuzzleStep > #puzzleSequence then
-            -- Puzzle Solved! Open Blast Door
-            isVaultUnlocked = true
+        if run.PuzzleStep > #PUZZLE_SEQUENCE then
+            -- Vault Solved for this specific party/run!
+            run.IsVaultUnlocked = true
+            
+            -- Reward eligible participants (prevent duplicate rewards)
+            local RewardService = require(script.Parent:WaitForChild("RewardService"))
+            if not run.RewardedPlayers[player.UserId] then
+                run.RewardedPlayers[player.UserId] = true
+                RewardService.GrantReward(player, "PUZZLE SOLVED: CORE ALIGNMENT", 150, 250, "Puzzle_CoreMatrix")
+            end
+            
+            -- Replicate vault unsealed state
+            player:SetAttribute("MazeVaultUnlocked", true)
+            
+            -- If party mode, update party members
+            local partyId = player:GetAttribute("PartyId")
+            if partyId and partyId ~= "" then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p:GetAttribute("PartyId") == partyId then
+                        p:SetAttribute("MazeVaultUnlocked", true)
+                        if not run.RewardedPlayers[p.UserId] then
+                            run.RewardedPlayers[p.UserId] = true
+                            RewardService.GrantReward(p, "PUZZLE SOLVED: CORE ALIGNMENT", 150, 250, "Puzzle_CoreMatrix")
+                        end
+                    end
+                end
+            end
+            
+            -- Visually indicate vault opening in workspace
             local door = maze:FindFirstChild("BlastDoor_Omega")
             if door then
                 door.Transparency = 0.85
                 door.CanCollide = false
             end
             
-            -- Reward all participants
-            local RewardService = require(script.Parent:WaitForChild("RewardService"))
-            RewardService.GrantReward(player, "PUZZLE SOLVED: CORE ALIGNMENT", 150, 250, "Puzzle_CoreMatrix")
-            
-            print(string.format("[MazeManager] Operative %s solved Core Alignment! Blast Door Omega UNSEALED.", player.Name))
+            print(string.format("[MazeManager] Run %s solved Core Alignment! Blast Door Omega UNSEALED.", run.RunId))
             return true, "Core Matrix synchronized! Blast Door Omega opened!"
         else
-            return true, string.format("Matrix node %d/3 aligned.", currentPuzzleStep - 1)
+            return true, string.format("Matrix node %d/3 aligned.", run.PuzzleStep - 1)
         end
     else
-        -- Wrong sequence! Reset terminals
-        currentPuzzleStep = 1
-        if chamber then
-            for _, tName in ipairs(puzzleSequence) do
-                local m = chamber:FindFirstChild(tName)
-                if m and m:FindFirstChild("Console") then
-                    m.Console.Color = Color3.fromRGB(255, 60, 60)
-                end
-            end
-            task.delay(1.5, function()
-                if not isVaultUnlocked and chamber then
-                    local colors = {Color3.fromRGB(0, 220, 255), Color3.fromRGB(255, 200, 60), Color3.fromRGB(180, 100, 255)}
-                    for i, tName in ipairs(puzzleSequence) do
-                        local m = chamber:FindFirstChild(tName)
-                        if m and m:FindFirstChild("Console") then
-                            m.Console.Color = colors[i] or Color3.fromRGB(0, 220, 255)
-                        end
-                    end
-                end
-            end)
-        end
-        return false, "Desynchronization error! Matrix reset."
+        -- Incorrect sequence: reset this party's progress only
+        run.PuzzleStep = 1
+        return false, "Desynchronization error! Matrix sequence reset."
     end
 end
 
--- 4. Golden Key Story Objective
+-- 4. Isolated Golden Key Story Objective
 function MazeManager.ClaimGoldenKey(player: Player): (boolean, string)
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -177,10 +218,22 @@ function MazeManager.ClaimGoldenKey(player: Player): (boolean, string)
     local keyPart = vault and vault:FindFirstChild("StoryCollectible_GoldenKey")
     if not keyPart then return false, "Artefact unavailable" end
     
+    -- Strict Distance Verification
     local dist = (hrp.Position - keyPart.Position).Magnitude
     if dist > 15.0 then return false, "Too far from artefact pedestal" end
-    if not isVaultUnlocked then return false, "Vault security blast door is sealed" end
     
+    -- Verify Vault Security State for this Operative's Run
+    local run = MazeManager.GetRunState(player)
+    if not run.IsVaultUnlocked then
+        return false, "Vault security blast door is sealed for your squad"
+    end
+    
+    -- Prevent duplicate Golden Key claims within same run
+    if run.GoldenKeyClaimed[player.UserId] then
+        return false, "Story artefact already secured in this expedition"
+    end
+    
+    -- Verify Persistent Profile
     local DataStoreManager = require(script.Parent:WaitForChild("DataStoreManager"))
     local profile = DataStoreManager.GetSessionData(player)
     if not profile then return false, "Session unavailable" end
@@ -189,6 +242,7 @@ function MazeManager.ClaimGoldenKey(player: Player): (boolean, string)
         return false, "Story artefact already in operative possession"
     end
     
+    -- Grant Persistent Collectible
     if not profile.Inventory then profile.Inventory = {} end
     profile.Inventory["STORY_GOLDEN_KEY"] = {
         ItemId = "STORY_GOLDEN_KEY",
@@ -196,11 +250,18 @@ function MazeManager.ClaimGoldenKey(player: Player): (boolean, string)
         Quantity = 1
     }
     
+    -- Mark claimed for this run
+    run.GoldenKeyClaimed[player.UserId] = true
+    
+    -- Save profile persistently
+    DataStoreManager.SaveProfile(player, false)
+    
+    -- Grant Rewards
     local RewardService = require(script.Parent:WaitForChild("RewardService"))
     RewardService.GrantReward(player, "STORY ARTEFACT: THE GOLDEN KEY", 300, 500, "Story_GoldenKey")
     
     keyPart.Transparency = 0.8
-    print(string.format("[MazeManager] Operative %s claimed THE GOLDEN KEY!", player.Name))
+    print(string.format("[MazeManager] Operative %s claimed THE GOLDEN KEY (Run: %s)!", player.Name, run.RunId))
     return true, "THE GOLDEN KEY SECURED! Archive protocol initiated."
 end
 
@@ -210,6 +271,7 @@ function MazeManager.ExtractToNexus(player: Player)
     if char then
         teleportChar(char, Vector3.new(0, 12, 0))
         player:SetAttribute("MazeCheckpoint", nil)
+        player:SetAttribute("MazeVaultUnlocked", nil)
         MatchStateNotificationRE:FireClient(player, "Maze", "Extracted", {})
         print(string.format("[MazeManager] Operative %s safely evacuated to Central Nexus.", player.Name))
     end
@@ -295,5 +357,18 @@ LeaveMazeQueueRF.OnServerInvoke = function(player: Player)
     MazeManager.ExtractToNexus(player)
     return true
 end
+
+-- Periodic cleanup of abandoned runs (runs inactive for > 1 hour)
+task.spawn(function()
+    while true do
+        task.wait(300)
+        local now = os.clock()
+        for k, run in pairs(activeRuns) do
+            if now - run.LastInteraction > 3600 then
+                activeRuns[k] = nil
+            end
+        end
+    end
+end)
 
 return MazeManager

@@ -1,4 +1,4 @@
-﻿local GameConfig = {
+local GameConfig = {
     -- Movement & Physics
     WalkSpeed = 16,
     SprintSpeed = 26,
@@ -42,6 +42,7 @@
     
     -- Marketplace & Monetization Architecture (Optional Purchases)
     Monetization = {
+        Enabled = false,                      -- Kept disabled until product IDs and rewards are fully verified on Roblox
         FairPlayRules = {
             CoreGameplayFree = true,          -- Essential gameplay & access are 100% free
             ServerValidatedOnly = true,       -- Client requests never grant purchases directly
@@ -53,10 +54,17 @@
             CosmeticPack = 0
         },
         DeveloperProducts = {
-            CreditsSmall = 0,
+            CreditsSmall = 0,                 -- Replace with actual Developer Product ID when published
             CreditsMedium = 0
+        },
+        -- Reward mappings for recognized developer products
+        ProductRewards = {
+            -- Format: [ProductId] = { RewardType = "Credits", Amount = 500 }
         }
-    }
+    },
+    
+    -- Persistence & Concurrency
+    SessionLockDuration = 1200                -- 20 minutes lease duration for cross-server session locking
 }
 
 return table.freeze(GameConfig)
